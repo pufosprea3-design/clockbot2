@@ -106,35 +106,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // --- Butoane ---
     if (interaction.isButton()) {
+      // trimitem imediat defer ca să nu expire interacțiunea (3 sec)
+      await interaction.deferReply({ ephemeral: true });
+
       const userId = interaction.user.id;
       const now = Date.now();
 
       if (interaction.customId === "clockin") {
         if (userData[userId]?.start) {
-          return interaction.reply({ content: "⏳ Ești deja pontat!", ephemeral: true });
+          return interaction.editReply("⏳ Ești deja pontat!");
         }
         userData[userId] = { start: now };
         saveAll();
-        return interaction.reply({ content: "✅ Pontaj început!", ephemeral: true });
+        return interaction.editReply("✅ Pontaj început!");
       }
 
       if (interaction.customId === "clockout") {
         if (!userData[userId]?.start) {
-          return interaction.reply({ content: "❌ Nu ai pontaj activ!", ephemeral: true });
+          return interaction.editReply("❌ Nu ai pontaj activ!");
         }
         const diff = now - userData[userId].start;
         historyData[userId] = (historyData[userId] || 0) + diff;
         delete userData[userId];
         saveAll();
-        return interaction.reply({ content: `✅ Pontaj încheiat. Ai lucrat **${fmtHM(diff)}**.`, ephemeral: true });
+        return interaction.editReply(`✅ Pontaj încheiat. Ai lucrat **${fmtHM(diff)}**.`);
       }
 
       if (interaction.customId === "checktime") {
         if (!userData[userId]?.start) {
-          return interaction.reply({ content: "ℹ️ Nu ai pontaj activ.", ephemeral: true });
+          return interaction.editReply("ℹ️ Nu ai pontaj activ.");
         }
         const diff = now - userData[userId].start;
-        return interaction.reply({ content: `🕒 Timp curent: **${fmtHM(diff)}**`, ephemeral: true });
+        return interaction.editReply(`🕒 Timp curent: **${fmtHM(diff)}**`);
       }
 
       return; // închidem ramura de butoane
@@ -142,17 +145,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // --- Slash commands ---
     if (interaction.isChatInputCommand()) {
+      await interaction.deferReply(); // securizăm interacțiunea
+
       const userId = interaction.user.id;
 
       if (interaction.commandName === "calculpontaj") {
         const total = (historyData[userId] || 0) + (userData[userId]?.start ? (Date.now() - userData[userId].start) : 0);
-        return interaction.reply(`📊 Pontajul tău total: **${fmtHM(total)}**`);
+        return interaction.editReply(`📊 Pontajul tău total: **${fmtHM(total)}**`);
       }
 
       if (interaction.commandName === "pontajtotalgeneral") {
         const entries = Object.entries(historyData);
         if (entries.length === 0 && Object.keys(userData).length === 0) {
-          return interaction.reply("📭 Nu există încă date de pontaj.");
+          return interaction.editReply("📭 Nu există încă date de pontaj.");
         }
         // includem și sesiunile active în raportul general
         const now = Date.now();
@@ -165,13 +170,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const lines = [...totals.entries()]
           .sort((a,b) => b[1] - a[1])
           .map(([uid, ms], i) => `${i + 1}. <@${uid}> — **${fmtHM(ms)}**`);
-        return interaction.reply(`📜 **Pontaj total general:**\n${lines.join("\n")}`);
+        return interaction.editReply(`📜 **Pontaj total general:**\n${lines.join("\n")}`);
       }
     }
   } catch (e) {
     console.error("❌ Eroare la interaction:", e);
+    // încercăm să anunțăm userul dacă nu am răspuns încă
     if (interaction.isRepliable()) {
-      try { await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", ephemeral: true }); } catch {}
+      try {
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply("⚠️ A apărut o eroare. Încearcă din nou.");
+        } else {
+          await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", ephemeral: true });
+        }
+      } catch {}
     }
   }
 });
