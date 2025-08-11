@@ -1,7 +1,7 @@
 {
   "name": "clockbot",
   "version": "1.0.0",
-  "description": "Discord clock in/out bot (buttons + slash) with temp storage (/tmp) for Render",
+  "description": "Discord clock in/out bot (buttons + slash), temp storage (/tmp), Render Web Service with HTTP keepalive",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

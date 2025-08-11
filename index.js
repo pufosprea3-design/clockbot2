@@ -26,7 +26,7 @@ if (!TOKEN || !CLIENT_ID || !CHANNEL_ID) {
 }
 
 // ==== Căi fișiere (în /tmp, permis pe Render) ====
-const DATA_FILE = path.join("/tmp", "clockbot.data.json");     // sesiuni active
+const DATA_FILE = path.join("/tmp", "clockbot.data.json");       // sesiuni active
 const HISTORY_FILE = path.join("/tmp", "clockbot.history.json"); // totaluri ms
 
 // ==== Utilitare fișiere ====
@@ -174,6 +174,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try { await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", ephemeral: true }); } catch {}
     }
   }
+});
+
+// ==== Mini server HTTP pentru Render (Web Service) ====
+const http = require("http");
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running!");
+}).listen(PORT, () => {
+  console.log(`🌐 HTTP server pornit pe portul ${PORT}`);
 });
 
 // ==== Start bot ====
