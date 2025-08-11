@@ -1,18 +1,16 @@
 {
   "name": "clockbot",
   "version": "1.0.0",
-  "description": "",
+  "description": "Discord clock in/out bot (buttons + slash) with PostgreSQL",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "discord.js": "^14.21.0",
-    "fs": "^0.0.1-security",
-    "pg": "^8.16.3"
+    "discord.js": "^14.15.3",
+    "pg": "^8.12.0"
   }
 }

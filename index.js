@@ -1,137 +1,236 @@
-const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, Events, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+// ==== Discord & Utils ====
+const {
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  Events,
+} = require("discord.js");
 
-// 📌 Citim variabilele de mediu (setate în Railway)
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+// ==== Postgres ====
+const { Pool } = require("pg");
 
-// 📌 Setăm calea folderului pentru salvarea datelor
-const DATA_DIR = process.env.DATA_DIR || '/data';
-const DATA_FILE = path.join(DATA_DIR, 'data.json');
-const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+// ==== ENV (setezi în Render → Environment) ====
+const TOKEN = process.env.TOKEN;           // Discord Bot Token
+const CLIENT_ID = process.env.CLIENT_ID;   // Discord Application ID
+const CHANNEL_ID = process.env.CHANNEL_ID; // ID canal #pontaj
 
-// 📌 Asigurăm că folderul /data există
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '{}');
-if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, '{}');
-
-// 📌 Încărcăm datele din fișiere
-let userData = JSON.parse(fs.readFileSync(DATA_FILE));
-let historyData = JSON.parse(fs.readFileSync(HISTORY_FILE));
-
-// 📌 Funcție pentru salvarea datelor
-function saveData() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(historyData, null, 2));
+if (!TOKEN || !CLIENT_ID || !CHANNEL_ID) {
+  console.error("❌ Lipsesc variabile: TOKEN, CLIENT_ID, CHANNEL_ID");
+  process.exit(1);
 }
 
-// 📌 Inițializăm clientul Discord
+// Render oferă adesea DATABASE_URL; dacă nu, folosește PGHOST/PGUSER etc.
+const connectionString = process.env.DATABASE_URL || undefined;
+
+const pool = new Pool(
+  connectionString
+    ? { connectionString, ssl: { rejectUnauthorized: false } }
+    : {
+        host: process.env.PGHOST,
+        port: Number(process.env.PGPORT || 5432),
+        database: process.env.PGDATABASE,
+        user: process.env.PGUSER,
+        password: process.env.PGPASSWORD,
+        ssl: { rejectUnauthorized: false },
+      }
+);
+
+// ==== Helper timp ====
+function fmtHM(ms) {
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms / 60_000) % 60);
+  return `${h}h ${m}m`;
+}
+
+// ==== DB schema ====
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS work_sessions (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      start_ts TIMESTAMPTZ NOT NULL,
+      end_ts   TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON work_sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_active ON work_sessions(user_id, end_ts);
+  `);
+}
+
+// ==== Operații pontaj ====
+async function hasActiveSession(userId) {
+  const { rows } = await pool.query(
+    `SELECT id, start_ts
+       FROM work_sessions
+      WHERE user_id = $1 AND end_ts IS NULL
+   ORDER BY start_ts DESC
+      LIMIT 1`,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+async function startSession(userId, when = new Date()) {
+  await pool.query(
+    `INSERT INTO work_sessions (user_id, start_ts) VALUES ($1, $2)`,
+    [userId, when]
+  );
+}
+
+async function endSession(userId, when = new Date()) {
+  const { rows } = await pool.query(
+    `UPDATE work_sessions
+        SET end_ts = $2
+      WHERE user_id = $1 AND end_ts IS NULL
+  RETURNING start_ts, end_ts`,
+    [userId, when]
+  );
+  return rows[0] || null;
+}
+
+async function sumUserTotalMs(userId) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_ts, NOW()) - start_ts)))*1000, 0) AS ms
+       FROM work_sessions
+      WHERE user_id = $1`,
+    [userId]
+  );
+  return Number(rows[0]?.ms || 0);
+}
+
+async function sumAllTotals() {
+  const { rows } = await pool.query(
+    `SELECT user_id,
+            COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_ts, NOW()) - start_ts)))*1000, 0) AS ms
+       FROM work_sessions
+   GROUP BY user_id
+   ORDER BY ms DESC`
+  );
+  return rows.map(r => ({ userId: r.user_id, ms: Number(r.ms || 0) }));
+}
+
+// ==== Discord client ====
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+  intents: [
+    GatewayIntentBits.Guilds, // suficient pentru slash + butoane
+  ],
 });
 
-// 📌 Creăm comenzile slash
+// ==== Slash commands ====
 const commands = [
-    new SlashCommandBuilder()
-        .setName('calculpontaj')
-        .setDescription('Calculează pontajul tău total.'),
-    new SlashCommandBuilder()
-        .setName('pontajtotalgeneral')
-        .setDescription('Afișează pontajele totale ale tuturor utilizatorilor.')
-].map(command => command.toJSON());
+  new SlashCommandBuilder()
+    .setName("calculpontaj")
+    .setDescription("Calculează pontajul tău total (inclusiv sesiunea activă)."),
+  new SlashCommandBuilder()
+    .setName("pontajtotalgeneral")
+    .setDescription("Afișează totalurile tuturor utilizatorilor."),
+].map(c => c.toJSON());
 
-// 📌 Înregistrăm comenzile slash
-const rest = new REST({ version: '10' }).setToken(TOKEN);
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-(async () => {
-    try {
-        console.log('📡 Înregistrez comenzile slash...');
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('✅ Comenzile au fost înregistrate!');
-    } catch (error) {
-        console.error(error);
-    }
-})();
+// ==== Ready ====
+client.once(Events.ClientReady, async () => {
+  console.log(`✅ Bot online ca ${client.user.tag}`);
 
-// 📌 Când botul e online
-client.once(Events.ClientReady, () => {
-    console.log(`✅ Botul este online ca ${client.user.tag}`);
+  try {
+    await ensureSchema();
+    console.log("🗄️ Schema DB OK.");
+  } catch (e) {
+    console.error("❌ Eroare schema DB:", e);
+    process.exit(1);
+  }
 
-    // Mesaj cu butoane în canalul specificat
-    const channel = client.channels.cache.get(CHANNEL_ID);
-    if (channel) {
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder().setCustomId('clockin').setLabel('Clock In').setStyle(ButtonStyle.Success),
-                new ButtonBuilder().setCustomId('clockout').setLabel('Clock Out').setStyle(ButtonStyle.Danger),
-                new ButtonBuilder().setCustomId('checktime').setLabel('Check Time').setStyle(ButtonStyle.Primary)
-            );
-        channel.send({ content: '📋 Alege o acțiune:', components: [row] });
-    }
+  try {
+    console.log("📡 Înregistrez slash commands…");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Comenzile au fost înregistrate!");
+  } catch (e) {
+    console.error("❌ Eroare la înregistrarea comenzilor:", e);
+  }
+
+  // Trimite butoanele în #pontaj
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("clockin").setLabel("Clock In").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("clockout").setLabel("Clock Out").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId("checktime").setLabel("Check Time").setStyle(ButtonStyle.Primary),
+    );
+    await channel.send({ content: "📌 **Pontaj** — folosește butoanele de mai jos:", components: [row] });
+    console.log("✅ Mesajul cu butoane a fost trimis.");
+  } catch (e) {
+    console.error("❌ Nu pot trimite mesajul cu butoane:", e);
+  }
 });
 
-// 📌 Gestionăm interacțiunile cu butoane și slash
-client.on(Events.InteractionCreate, async interaction => {
+// ==== Interacțiuni (butoane + slash) ====
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    // --- Butoane ---
     if (interaction.isButton()) {
-        const userId = interaction.user.id;
-        const now = Date.now();
+      const userId = interaction.user.id;
 
-        if (interaction.customId === 'clockin') {
-            if (userData[userId] && userData[userId].start) {
-                return interaction.reply({ content: '⚠️ Ești deja în pontaj!', ephemeral: true });
-            }
-            userData[userId] = { start: now };
-            saveData();
-            return interaction.reply({ content: '✅ Pontaj început!', ephemeral: true });
-
-        } else if (interaction.customId === 'clockout') {
-            if (!userData[userId] || !userData[userId].start) {
-                return interaction.reply({ content: '⚠️ Nu ai pontaj activ!', ephemeral: true });
-            }
-            const diff = now - userData[userId].start;
-            const hours = Math.floor(diff / (1000 * 60 * 60));
-            const minutes = Math.floor((diff / (1000 * 60)) % 60);
-
-            historyData[userId] = (historyData[userId] || 0) + diff;
-            delete userData[userId];
-            saveData();
-
-            return interaction.reply({ content: `✅ Pontaj încheiat! Ai lucrat ${hours}h ${minutes}m.`, ephemeral: true });
-
-        } else if (interaction.customId === 'checktime') {
-            if (!userData[userId] || !userData[userId].start) {
-                return interaction.reply({ content: '⚠️ Nu ai pontaj activ!', ephemeral: true });
-            }
-            const diff = now - userData[userId].start;
-            const hours = Math.floor(diff / (1000 * 60 * 60));
-            const minutes = Math.floor((diff / (1000 * 60)) % 60);
-            return interaction.reply({ content: `🕒 Timp lucrat: ${hours}h ${minutes}m`, ephemeral: true });
+      if (interaction.customId === "clockin") {
+        const active = await hasActiveSession(userId);
+        if (active) {
+          return interaction.reply({ content: "⏳ Ești deja pontat!", ephemeral: true });
         }
+        await startSession(userId, new Date());
+        return interaction.reply({ content: "✅ Pontaj început!", ephemeral: true });
+      }
+
+      if (interaction.customId === "clockout") {
+        const active = await hasActiveSession(userId);
+        if (!active) {
+          return interaction.reply({ content: "❌ Nu ai pontaj activ!", ephemeral: true });
+        }
+        const ended = await endSession(userId, new Date());
+        const ms = new Date(ended.end_ts).getTime() - new Date(ended.start_ts).getTime();
+        return interaction.reply({ content: `✅ Pontaj încheiat. Ai lucrat **${fmtHM(ms)}**.`, ephemeral: true });
+      }
+
+      if (interaction.customId === "checktime") {
+        const active = await hasActiveSession(userId);
+        if (!active) {
+          return interaction.reply({ content: "ℹ️ Nu ai pontaj activ.", ephemeral: true });
+        }
+        const ms = Date.now() - new Date(active.start_ts).getTime();
+        return interaction.reply({ content: `🕒 Timp curent: **${fmtHM(ms)}**`, ephemeral: true });
+      }
+
+      return; // închidem ramura de butoane
     }
 
+    // --- Slash commands ---
     if (interaction.isChatInputCommand()) {
-        const userId = interaction.user.id;
+      const userId = interaction.user.id;
 
-        if (interaction.commandName === 'calculpontaj') {
-            const total = (historyData[userId] || 0) + (userData[userId] ? (Date.now() - userData[userId].start) : 0);
-            const hours = Math.floor(total / (1000 * 60 * 60));
-            const minutes = Math.floor((total / (1000 * 60)) % 60);
-            return interaction.reply({ content: `📊 Pontajul tău total: ${hours}h ${minutes}m` });
+      if (interaction.commandName === "calculpontaj") {
+        const totalMs = await sumUserTotalMs(userId);
+        return interaction.reply(`📊 Pontajul tău total: **${fmtHM(totalMs)}**`);
+      }
 
-        } else if (interaction.commandName === 'pontajtotalgeneral') {
-            let result = '📋 **Pontaj total general:**\n';
-            for (const id in historyData) {
-                const total = historyData[id];
-                const hours = Math.floor(total / (1000 * 60 * 60));
-                const minutes = Math.floor((total / (1000 * 60)) % 60);
-                result += `<@${id}>: ${hours}h ${minutes}m\n`;
-            }
-            return interaction.reply({ content: result || '⚠️ Nu există date de pontaj.' });
-        }
+      if (interaction.commandName === "pontajtotalgeneral") {
+        const all = await sumAllTotals();
+        if (all.length === 0) return interaction.reply("📭 Nu există încă date de pontaj.");
+        const lines = all.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmtHM(r.ms)}**`);
+        return interaction.reply(`📜 **Pontaj total general:**\n${lines.join("\n")}`);
+      }
     }
+  } catch (e) {
+    console.error("❌ Eroare la interaction:", e);
+    if (interaction.isRepliable()) {
+      try {
+        await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", ephemeral: true });
+      } catch {}
+    }
+  }
 });
 
-// 📌 Pornim botul
+// ==== Start bot ====
 client.login(TOKEN);
