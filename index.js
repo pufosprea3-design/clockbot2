@@ -25,9 +25,9 @@ if (!TOKEN || !CLIENT_ID || !CHANNEL_ID) {
   process.exit(1);
 }
 
-// ==== Căi fișiere (în /tmp, permis pe Render) ====
-const DATA_FILE = path.join("/tmp", "clockbot.data.json");       // sesiuni active
-const HISTORY_FILE = path.join("/tmp", "clockbot.history.json"); // totaluri ms
+// ==== Căi fișiere (/tmp pentru Render) ====
+const DATA_FILE = path.join("/tmp", "clockbot.data.json");
+const HISTORY_FILE = path.join("/tmp", "clockbot.history.json");
 
 // ==== Utilitare fișiere ====
 function readJsonSafe(file, fallback) {
@@ -41,9 +41,9 @@ function writeJsonSafe(file, obj) {
   try { fs.writeFileSync(file, JSON.stringify(obj, null, 2)); } catch {}
 }
 
-// ==== Date in-memory (încărcate din /tmp la start) ====
-let userData = readJsonSafe(DATA_FILE, {});       // { userId: { start: epochMs } }
-let historyData = readJsonSafe(HISTORY_FILE, {}); // { userId: totalMs }
+// ==== Date in-memory ====
+let userData = readJsonSafe(DATA_FILE, {});
+let historyData = readJsonSafe(HISTORY_FILE, {});
 function saveAll() {
   writeJsonSafe(DATA_FILE, userData);
   writeJsonSafe(HISTORY_FILE, historyData);
@@ -58,7 +58,7 @@ function fmtHM(ms) {
 
 // ==== Discord client ====
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds], // suficient pt slash + butoane
+  intents: [GatewayIntentBits.Guilds],
 });
 
 // ==== Slash commands ====
@@ -77,7 +77,6 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Bot online ca ${client.user.tag}`);
 
-  // Înregistrează slash commands (global)
   try {
     console.log("📡 Înregistrez slash commands…");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
@@ -86,7 +85,6 @@ client.once(Events.ClientReady, async () => {
     console.error("❌ Eroare la înregistrarea comenzilor:", e);
   }
 
-  // Trimite mesajul cu butoane în #pontaj
   try {
     const channel = await client.channels.fetch(CHANNEL_ID);
     const row = new ActionRowBuilder().addComponents(
@@ -101,13 +99,12 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ==== Interacțiuni (butoane + slash) ====
+// ==== Interacțiuni ====
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // --- Butoane ---
     if (interaction.isButton()) {
-      // trimitem imediat defer ca să nu expire interacțiunea (3 sec)
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: 64 });
 
       const userId = interaction.user.id;
       const now = Date.now();
@@ -140,12 +137,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.editReply(`🕒 Timp curent: **${fmtHM(diff)}**`);
       }
 
-      return; // închidem ramura de butoane
+      return;
     }
 
     // --- Slash commands ---
     if (interaction.isChatInputCommand()) {
-      await interaction.deferReply(); // securizăm interacțiunea
+      await interaction.deferReply(); // pentru slash, nu punem flags ca să fie public
 
       const userId = interaction.user.id;
 
@@ -159,7 +156,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (entries.length === 0 && Object.keys(userData).length === 0) {
           return interaction.editReply("📭 Nu există încă date de pontaj.");
         }
-        // includem și sesiunile active în raportul general
         const now = Date.now();
         const totals = new Map();
         for (const [uid, ms] of entries) totals.set(uid, (totals.get(uid) || 0) + ms);
@@ -175,20 +171,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (e) {
     console.error("❌ Eroare la interaction:", e);
-    // încercăm să anunțăm userul dacă nu am răspuns încă
     if (interaction.isRepliable()) {
       try {
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply("⚠️ A apărut o eroare. Încearcă din nou.");
         } else {
-          await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", ephemeral: true });
+          await interaction.reply({ content: "⚠️ A apărut o eroare. Încearcă din nou.", flags: 64 });
         }
       } catch {}
     }
   }
 });
 
-// ==== Mini server HTTP pentru Render (Web Service) ====
+// ==== HTTP keepalive pentru Render ====
 const http = require("http");
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
