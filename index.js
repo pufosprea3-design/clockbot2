@@ -1,4 +1,3 @@
-// ==== Discord (buttons + slash) ====
 const {
   Client,
   GatewayIntentBits,
@@ -11,37 +10,39 @@ const {
   Events,
 } = require("discord.js");
 
-// ==== Files (stocare temporară în /tmp) ====
 const fs = require("fs");
 const path = require("path");
 
-// ==== ENV (setezi în Render → Environment) ====
-const TOKEN = process.env.TOKEN;           // Discord Bot Token
-const CLIENT_ID = process.env.CLIENT_ID;   // Discord Application ID
-const CHANNEL_ID = process.env.CHANNEL_ID; // ID-ul canalului #pontaj
+// === ENV ===
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const CHANNEL_ID = process.env.CHANNEL_ID;
 
 if (!TOKEN || !CLIENT_ID || !CHANNEL_ID) {
   console.error("❌ Lipsesc variabile: TOKEN, CLIENT_ID, CHANNEL_ID");
   process.exit(1);
 }
 
-// ==== Căi fișiere (/tmp pentru Render) ====
+// === Fișiere în /tmp (Render-friendly) ===
 const DATA_FILE = path.join("/tmp", "clockbot.data.json");
 const HISTORY_FILE = path.join("/tmp", "clockbot.history.json");
 
-// ==== Utilitare fișiere ====
 function readJsonSafe(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     const raw = fs.readFileSync(file, "utf8");
     return JSON.parse(raw || "null") ?? fallback;
-  } catch { return fallback; }
-}
-function writeJsonSafe(file, obj) {
-  try { fs.writeFileSync(file, JSON.stringify(obj, null, 2)); } catch {}
+  } catch {
+    return fallback;
+  }
 }
 
-// ==== Date in-memory ====
+function writeJsonSafe(file, obj) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  } catch {}
+}
+
 let userData = readJsonSafe(DATA_FILE, {});
 let historyData = readJsonSafe(HISTORY_FILE, {});
 function saveAll() {
@@ -49,31 +50,37 @@ function saveAll() {
   writeJsonSafe(HISTORY_FILE, historyData);
 }
 
-// ==== Helpers timp ====
+// === Funcție format timp ===
 function fmtHM(ms) {
   const h = Math.floor(ms / 3_600_000);
   const m = Math.floor((ms / 60_000) % 60);
   return `${h}h ${m}m`;
 }
 
-// ==== Discord client ====
+// === Client Discord ===
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-// ==== Slash commands ====
+// === Comenzi Slash ===
 const commands = [
   new SlashCommandBuilder()
     .setName("calculpontaj")
-    .setDescription("Calculează pontajul tău total (incluzând sesiunea activă)."),
+    .setDescription("Arată pontajul tău total (inclusiv sesiunea activă)."),
   new SlashCommandBuilder()
     .setName("pontajtotalgeneral")
-    .setDescription("Afișează pontajele totale ale tuturor utilizatorilor.")
+    .setDescription("Arată pontajele totale pentru toți utilizatorii."),
+  new SlashCommandBuilder()
+    .setName("pepontaj")
+    .setDescription("Arată utilizatorii care sunt în prezent pontați."),
+  new SlashCommandBuilder()
+    .setName("resetpontaj")
+    .setDescription("Resetează complet toate datele de pontaj.")
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-// ==== Ready ====
+// === Ready ===
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Bot online ca ${client.user.tag}`);
 
@@ -92,17 +99,17 @@ client.once(Events.ClientReady, async () => {
       new ButtonBuilder().setCustomId("clockout").setLabel("Clock Out").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId("checktime").setLabel("Check Time").setStyle(ButtonStyle.Primary),
     );
-    await channel.send({ content: "📌 **Pontaj** — folosește butoanele de mai jos:", components: [row] });
+    await channel.send({ content: "📌 **Pontaj** — folosește butoanele:", components: [row] });
     console.log("✅ Mesajul cu butoane a fost trimis.");
   } catch (e) {
     console.error("❌ Nu pot trimite mesajul cu butoane:", e);
   }
 });
 
-// ==== Interacțiuni ====
+// === Interacțiuni ===
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // --- Butoane ---
+    // === Butoane ===
     if (interaction.isButton()) {
       await interaction.deferReply({ flags: 64 });
 
@@ -136,37 +143,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const diff = now - userData[userId].start;
         return interaction.editReply(`🕒 Timp curent: **${fmtHM(diff)}**`);
       }
-
-      return;
     }
 
-    // --- Slash commands ---
+    // === Slash Commands ===
     if (interaction.isChatInputCommand()) {
-      await interaction.deferReply(); // pentru slash, nu punem flags ca să fie public
+      await interaction.deferReply();
 
       const userId = interaction.user.id;
+      const now = Date.now();
 
       if (interaction.commandName === "calculpontaj") {
-        const total = (historyData[userId] || 0) + (userData[userId]?.start ? (Date.now() - userData[userId].start) : 0);
+        const total = (historyData[userId] || 0) +
+          (userData[userId]?.start ? (now - userData[userId].start) : 0);
         return interaction.editReply(`📊 Pontajul tău total: **${fmtHM(total)}**`);
       }
 
       if (interaction.commandName === "pontajtotalgeneral") {
-        const entries = Object.entries(historyData);
-        if (entries.length === 0 && Object.keys(userData).length === 0) {
-          return interaction.editReply("📭 Nu există încă date de pontaj.");
-        }
-        const now = Date.now();
         const totals = new Map();
-        for (const [uid, ms] of entries) totals.set(uid, (totals.get(uid) || 0) + ms);
+        for (const [uid, ms] of Object.entries(historyData)) {
+          totals.set(uid, ms);
+        }
         for (const [uid, obj] of Object.entries(userData)) {
           const extra = now - (obj.start || now);
           totals.set(uid, (totals.get(uid) || 0) + extra);
         }
+        if (totals.size === 0) {
+          return interaction.editReply("📭 Nu există date de pontaj.");
+        }
         const lines = [...totals.entries()]
-          .sort((a,b) => b[1] - a[1])
+          .sort((a, b) => b[1] - a[1])
           .map(([uid, ms], i) => `${i + 1}. <@${uid}> — **${fmtHM(ms)}**`);
         return interaction.editReply(`📜 **Pontaj total general:**\n${lines.join("\n")}`);
+      }
+
+      if (interaction.commandName === "pepontaj") {
+        const active = Object.keys(userData);
+        if (active.length === 0) {
+          return interaction.editReply("📭 Nu este nimeni pontat acum.");
+        }
+        const lines = active.map(uid => `<@${uid}>`);
+        return interaction.editReply(`🟢 **Utilizatori pe pontaj:**\n${lines.join("\n")}`);
+      }
+
+      if (interaction.commandName === "resetpontaj") {
+        userData = {};
+        historyData = {};
+        saveAll();
+        return interaction.editReply("♻️ Pontajul a fost resetat complet!");
       }
     }
   } catch (e) {
@@ -183,7 +206,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ==== HTTP keepalive pentru Render ====
+// === HTTP server pentru Render ===
 const http = require("http");
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -193,5 +216,4 @@ http.createServer((req, res) => {
   console.log(`🌐 HTTP server pornit pe portul ${PORT}`);
 });
 
-// ==== Start bot ====
 client.login(TOKEN);
